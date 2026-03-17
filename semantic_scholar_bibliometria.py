@@ -318,6 +318,118 @@ def build_keyword_table(df: pd.DataFrame, text_column: str, top_n: int = 20) -> 
     return keyword_df.sort_values(["documentos", "citacoes"], ascending=[False, False]).head(top_n).reset_index(drop=True)
 
 
+def build_keyword_network(
+    df: pd.DataFrame,
+    text_column: str,
+    max_terms: int = 20,
+    max_edges: int = 40,
+    max_terms_per_document: int = 8,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if df.empty or text_column not in df.columns:
+        return pd.DataFrame(), pd.DataFrame()
+
+    top_df = top_terms(df[text_column], n=max_terms)
+    if top_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    selected_terms = set(top_df["termo"].tolist())
+    edge_weights: Counter[tuple[str, str]] = Counter()
+    node_docs: Counter[str] = Counter()
+    node_citations: Counter[str] = Counter()
+
+    for row in df.itertuples(index=False):
+        citations = safe_int(getattr(row, "citacoes"))
+        terms = [term for term in tokenize_text(getattr(row, text_column)) if term in selected_terms]
+        unique_terms = []
+        for term in terms:
+            if term not in unique_terms:
+                unique_terms.append(term)
+        unique_terms = unique_terms[:max_terms_per_document]
+
+        for term in unique_terms:
+            node_docs[term] += 1
+            node_citations[term] += citations
+
+        for source, target in combinations(sorted(unique_terms), 2):
+            edge_weights[(source, target)] += 1
+
+    node_df = pd.DataFrame(
+        [
+            {"termo": term, "documentos": docs, "citacoes": node_citations[term]}
+            for term, docs in node_docs.items()
+        ]
+    )
+    if node_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    node_df = node_df.sort_values(["documentos", "citacoes"], ascending=[False, False]).reset_index(drop=True)
+    allowed_terms = set(node_df["termo"])
+    edge_df = pd.DataFrame(
+        [
+            {"source": source, "target": target, "peso": weight}
+            for (source, target), weight in edge_weights.items()
+            if source in allowed_terms and target in allowed_terms
+        ]
+    )
+    if edge_df.empty:
+        return edge_df, node_df.head(max_terms).reset_index(drop=True)
+
+    edge_df = edge_df.sort_values(["peso", "source", "target"], ascending=[False, True, True]).head(max_edges)
+    connected_terms = set(edge_df["source"]).union(edge_df["target"])
+    node_df = node_df[node_df["termo"].isin(connected_terms)].head(max_terms).reset_index(drop=True)
+    return edge_df.reset_index(drop=True), node_df
+
+
+def escape_graphviz_text(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def build_network_dot(
+    node_df: pd.DataFrame,
+    edge_df: pd.DataFrame,
+    node_column: str,
+    label_prefix: str,
+) -> str:
+    if edge_df.empty or node_df.empty:
+        return ""
+
+    node_docs = {row[node_column]: safe_int(row["documentos"]) for _, row in node_df.iterrows()}
+    node_citations = {row[node_column]: safe_int(row["citacoes"]) for _, row in node_df.iterrows()}
+    max_docs = max(node_docs.values()) if node_docs else 1
+    max_weight = max(edge_df["peso"]) if not edge_df.empty else 1
+    node_ids = {name: f"n{idx}" for idx, name in enumerate(sorted(node_docs))}
+
+    lines = [
+        "graph G {",
+        'graph [layout="sfdp", overlap=false, splines=true, bgcolor="transparent"];',
+        'node [shape=circle, style="filled", fillcolor="#E8F1FB", color="#1D4E89", fontname="Helvetica"];',
+        'edge [color="#8FB3D9", fontname="Helvetica"];',
+    ]
+
+    for name in sorted(node_docs):
+        docs = node_docs[name]
+        citations = node_citations.get(name, 0)
+        size = 0.8 + (docs / max_docs) * 1.6
+        fontsize = 10 + int((docs / max_docs) * 8)
+        label = escape_graphviz_text(f"{name}\n{docs} {label_prefix} | {citations} cit.")
+        lines.append(
+            f'"{node_ids[name]}" [width={size:.2f}, height={size:.2f}, fontsize={fontsize}, label="{label}"];'
+        )
+
+    for _, row in edge_df.iterrows():
+        weight = safe_int(row["peso"])
+        penwidth = 1.0 + (weight / max_weight) * 4.0
+        source = node_ids.get(row["source"])
+        target = node_ids.get(row["target"])
+        if source and target:
+            lines.append(
+                f'"{source}" -- "{target}" [label="{weight}", penwidth={penwidth:.2f}];'
+            )
+
+    lines.append("}")
+    return "\n".join(lines)
+
+
 def fetch_bulk_page(
     session: Session,
     api_key: str,
@@ -632,40 +744,7 @@ def build_coauthorship_network(
 
 
 def build_coauthorship_dot(edge_df: pd.DataFrame, node_df: pd.DataFrame) -> str:
-    if edge_df.empty or node_df.empty:
-        return ""
-
-    node_docs = {row["autor"]: safe_int(row["documentos"]) for _, row in node_df.iterrows()}
-    node_citations = {row["autor"]: safe_int(row["citacoes"]) for _, row in node_df.iterrows()}
-    max_docs = max(node_docs.values()) if node_docs else 1
-    max_weight = max(edge_df["peso"]) if not edge_df.empty else 1
-
-    lines = [
-        "graph G {",
-        'graph [layout="sfdp", overlap=false, splines=true, bgcolor="transparent"];',
-        'node [shape=circle, style="filled", fillcolor="#E8F1FB", color="#1D4E89", fontname="Helvetica"];',
-        'edge [color="#8FB3D9", fontname="Helvetica"];',
-    ]
-
-    for author in sorted(node_docs):
-        docs = node_docs[author]
-        citations = node_citations.get(author, 0)
-        size = 0.8 + (docs / max_docs) * 1.6
-        fontsize = 10 + int((docs / max_docs) * 8)
-        label = f"{author}\\n{docs} docs | {citations} cit."
-        lines.append(
-            f'"{author}" [width={size:.2f}, height={size:.2f}, fontsize={fontsize}, label="{label}"];'
-        )
-
-    for _, row in edge_df.iterrows():
-        weight = safe_int(row["peso"])
-        penwidth = 1.0 + (weight / max_weight) * 4.0
-        lines.append(
-            f'"{row["source"]}" -- "{row["target"]}" [label="{weight}", penwidth={penwidth:.2f}];'
-        )
-
-    lines.append("}")
-    return "\n".join(lines)
+    return build_network_dot(node_df, edge_df, node_column="autor", label_prefix="docs")
 
 
 def show_metric_block(df: pd.DataFrame) -> None:
@@ -695,6 +774,7 @@ def show_charts(df: pd.DataFrame) -> None:
     keyword_summary, bigram_summary = build_keyword_summary(df, "texto_analise", top_n_terms=25, top_n_bigrams=20)
     keyword_table = build_keyword_table(df, "texto_analise", top_n=20)
     term_year_summary = build_term_year_summary(df, "texto_analise", top_n_terms=12)
+    keyword_edge_df, keyword_node_df = build_keyword_network(df, "texto_analise", max_terms=20, max_edges=40)
 
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         ["Produção", "Atores", "Grafos", "Tabelas", "Assuntos", "Dados"]
@@ -745,14 +825,33 @@ def show_charts(df: pd.DataFrame) -> None:
             st.bar_chart(field_summary.set_index("area")[["documentos"]])
 
     with tab3:
-        st.subheader("Grafo de coautoria")
-        if edge_df.empty or node_df.empty:
-            st.info("Não houve coautorias suficientes nos resultados filtrados para montar o grafo.")
-        else:
-            st.caption("Nós maiores representam autores com mais documentos. As arestas indicam coautorias.")
-            dot_graph = build_coauthorship_dot(edge_df, node_df)
-            st.graphviz_chart(dot_graph, use_container_width=True)
-            st.dataframe(edge_df.rename(columns={"source": "autor_1", "target": "autor_2"}), use_container_width=True)
+        graph_col1, graph_col2 = st.columns(2)
+
+        with graph_col1:
+            st.subheader("Grafo de coautoria")
+            if edge_df.empty or node_df.empty:
+                st.info("Não houve coautorias suficientes nos resultados filtrados para montar este grafo.")
+            else:
+                st.caption("Nós maiores representam autores com mais documentos. As arestas indicam coautorias.")
+                dot_graph = build_coauthorship_dot(edge_df, node_df)
+                st.graphviz_chart(dot_graph, use_container_width=True)
+                st.dataframe(
+                    edge_df.rename(columns={"source": "autor_1", "target": "autor_2"}),
+                    use_container_width=True,
+                )
+
+        with graph_col2:
+            st.subheader("Grafo de coocorrência de palavras-chave")
+            if keyword_edge_df.empty or keyword_node_df.empty:
+                st.info("Não houve termos suficientes para montar o grafo de palavras-chave.")
+            else:
+                st.caption("Os nós representam termos frequentes em títulos e resumos; as arestas mostram coocorrência.")
+                dot_graph = build_network_dot(keyword_node_df, keyword_edge_df, node_column="termo", label_prefix="docs")
+                st.graphviz_chart(dot_graph, use_container_width=True)
+                st.dataframe(
+                    keyword_edge_df.rename(columns={"source": "termo_1", "target": "termo_2"}),
+                    use_container_width=True,
+                )
 
     with tab4:
         st.subheader("Resumo por ano")
@@ -857,25 +956,11 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Consulta")
+        api_key = default_api_key
         if has_managed_api_key:
-            st.success("A chave da API ja esta configurada no servidor. Os visitantes nao precisam informar uma chave.")
-            override_api_key = st.toggle("Usar outra chave nesta sessao", value=False)
-            if override_api_key:
-                api_key = st.text_input(
-                    "Substituir chave da API",
-                    type="password",
-                    value=default_api_key,
-                    help="Use isso apenas se quiser testar outra chave nesta sessao.",
-                )
-            else:
-                api_key = default_api_key
+            st.success("A chave da API esta configurada no servidor e ficou oculta para os visitantes.")
         else:
-            api_key = st.text_input(
-                "Chave da API Semantic Scholar",
-                type="password",
-                value="",
-                help="Opcional para testes leves, mas recomendada para uso recorrente.",
-            )
+            st.info("Este app esta usando a API sem chave configurada no servidor. Pode haver limite de requisicoes.")
         query = st.text_area("Consulta", value=DEFAULT_QUERY, height=110)
         year_filter = st.text_input(
             "Filtro de ano",

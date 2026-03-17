@@ -9,7 +9,7 @@ App em Streamlit para repetir a análise bibliométrica que antes usava Scopus, 
 - calcula indicadores bibliométricos simples
 - mostra gráficos por ano, autores, venues, tipos de publicação, áreas e palavras-chave
 - inclui tabelas-resumo por ano, autores, periódicos, áreas e acesso aberto
-- inclui grafo de coautoria entre autores
+- inclui grafo de coautoria entre autores e grafo de coocorrência de palavras-chave
 - usa títulos e resumos para destacar assuntos, palavras-chave, expressões frequentes e evolução dos termos por ano
 - exporta os dados tratados em CSV e Excel com múltiplas abas de resumo
 
@@ -35,7 +35,7 @@ Para o deploy no Streamlit Community Cloud, a mesma chave pode ser colada como s
 S2_API_KEY = "sua-chave-aqui"
 ```
 
-Quando a chave estiver configurada em `Secrets`, o app usa essa chave no servidor e os visitantes não precisam preencher esse campo na interface.
+Quando a chave estiver configurada em `Secrets`, o app usa essa chave no servidor e o campo da API fica oculto para os visitantes.
 
 ## Execução
 
