@@ -7,9 +7,10 @@ App em Streamlit para repetir a análise bibliométrica que antes usava Scopus, 
 - busca artigos pelo endpoint `GET /graph/v1/paper/search/bulk`
 - pagina resultados usando `token`, no estilo do exemplo `search_bulk/get_dataset.py` do repositório `allenai/s2-folks`
 - calcula indicadores bibliométricos simples
-- mostra gráficos por ano, autores, venues, tipos de publicação, áreas e termos dos títulos
+- mostra gráficos por ano, autores, venues, tipos de publicação, áreas e palavras-chave
 - inclui tabelas-resumo por ano, autores, periódicos, áreas e acesso aberto
 - inclui grafo de coautoria entre autores
+- usa títulos e resumos para destacar assuntos, palavras-chave, expressões frequentes e evolução dos termos por ano
 - exporta os dados tratados em CSV e Excel com múltiplas abas de resumo
 
 ## Instalação

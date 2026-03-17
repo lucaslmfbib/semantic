@@ -24,6 +24,7 @@ DEFAULT_QUERY = '"artificial intelligence" libraries'
 DEFAULT_FIELDS = ",".join(
     [
         "title",
+        "abstract",
         "year",
         "publicationDate",
         "citationCount",
@@ -41,13 +42,27 @@ DEFAULT_FIELDS = ",".join(
 STOPWORDS = {
     "a",
     "about",
+    "analysis",
     "and",
+    "are",
     "artificial",
     "as",
     "at",
+    "also",
+    "among",
+    "approach",
+    "article",
+    "based",
+    "be",
+    "been",
+    "being",
+    "between",
     "biblioteca",
     "bibliotecas",
+    "can",
     "com",
+    "could",
+    "design",
     "da",
     "das",
     "de",
@@ -56,25 +71,78 @@ STOPWORDS = {
     "e",
     "education",
     "em",
+    "estudo",
     "for",
+    "from",
+    "has",
+    "how",
     "in",
     "intelligence",
+    "into",
+    "its",
     "library",
     "libraries",
+    "main",
+    "machine",
+    "many",
+    "may",
+    "methods",
+    "more",
+    "most",
     "na",
     "nas",
+    "new",
     "no",
     "nos",
     "o",
     "of",
+    "one",
     "on",
+    "our",
     "or",
+    "paper",
     "para",
     "por",
+    "purpose",
+    "research",
+    "results",
+    "review",
+    "scholar",
+    "semantic",
+    "shows",
+    "study",
+    "systematic",
+    "such",
+    "than",
+    "that",
     "the",
+    "their",
+    "them",
+    "there",
+    "these",
+    "this",
+    "those",
     "to",
+    "two",
     "um",
     "uma",
+    "use",
+    "used",
+    "using",
+    "various",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "whose",
+    "will",
+    "with",
+    "within",
+    "without",
+    "would",
 }
 
 
@@ -146,13 +214,108 @@ def split_multivalue_column(series: pd.Series) -> pd.Series:
     return pd.Series(values, dtype="string")
 
 
-def top_words(texts: pd.Series, n: int = 20) -> pd.DataFrame:
+def tokenize_text(text: str, min_length: int = 3) -> list[str]:
+    tokens = []
+    for token in re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]{3,}", text.lower()):
+        if len(token) >= min_length and token not in STOPWORDS:
+            tokens.append(token)
+    return tokens
+
+
+def top_terms(texts: pd.Series, n: int = 20, min_length: int = 3) -> pd.DataFrame:
     tokens: Counter[str] = Counter()
     for text in texts.dropna().astype(str):
-        for token in re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]{3,}", text.lower()):
-            if token not in STOPWORDS:
-                tokens[token] += 1
+        for token in tokenize_text(text, min_length=min_length):
+            tokens[token] += 1
     return pd.DataFrame(tokens.most_common(n), columns=["termo", "frequencia"])
+
+
+def top_ngrams(texts: pd.Series, n: int = 20, size: int = 2) -> pd.DataFrame:
+    ngrams: Counter[str] = Counter()
+    for text in texts.dropna().astype(str):
+        tokens = tokenize_text(text)
+        if len(tokens) < size:
+            continue
+        for idx in range(len(tokens) - size + 1):
+            gram = " ".join(tokens[idx : idx + size])
+            ngrams[gram] += 1
+    return pd.DataFrame(ngrams.most_common(n), columns=[f"{size}grama", "frequencia"])
+
+
+def build_keyword_summary(
+    df: pd.DataFrame,
+    text_column: str,
+    top_n_terms: int = 25,
+    top_n_bigrams: int = 20,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if df.empty or text_column not in df.columns:
+        return pd.DataFrame(), pd.DataFrame()
+    return (
+        top_terms(df[text_column], n=top_n_terms),
+        top_ngrams(df[text_column], n=top_n_bigrams, size=2),
+    )
+
+
+def build_term_year_summary(df: pd.DataFrame, text_column: str, top_n_terms: int = 12) -> pd.DataFrame:
+    if df.empty or text_column not in df.columns or "ano" not in df.columns:
+        return pd.DataFrame()
+
+    top_df = top_terms(df[text_column], n=top_n_terms)
+    if top_df.empty:
+        return pd.DataFrame()
+
+    selected_terms = top_df["termo"].tolist()
+    rows = []
+    year_df = df.dropna(subset=["ano"])
+    for row in year_df.itertuples(index=False):
+        tokens = set(tokenize_text(getattr(row, text_column)))
+        for term in selected_terms:
+            if term in tokens:
+                rows.append({"ano": safe_int(getattr(row, "ano")), "termo": term})
+
+    if not rows:
+        return pd.DataFrame()
+
+    summary = (
+        pd.DataFrame(rows)
+        .groupby(["ano", "termo"], as_index=False)
+        .size()
+        .rename(columns={"size": "frequencia"})
+        .sort_values(["ano", "frequencia"], ascending=[True, False])
+    )
+    return summary
+
+
+def build_keyword_table(df: pd.DataFrame, text_column: str, top_n: int = 20) -> pd.DataFrame:
+    if df.empty or text_column not in df.columns:
+        return pd.DataFrame()
+
+    term_counter: Counter[str] = Counter()
+    citation_counter: Counter[str] = Counter()
+    doc_counter: Counter[str] = Counter()
+
+    for row in df.itertuples(index=False):
+        tokens = set(tokenize_text(getattr(row, text_column)))
+        citations = safe_int(getattr(row, "citacoes"))
+        for token in tokens:
+            term_counter[token] += 1
+            citation_counter[token] += citations
+            doc_counter[token] += 1
+
+    rows = [
+        {
+            "palavra_chave": term,
+            "documentos": doc_counter[term],
+            "citacoes": citation_counter[term],
+            "citacoes_medias": round(citation_counter[term] / doc_counter[term], 2),
+        }
+        for term in term_counter
+    ]
+    if not rows:
+        return pd.DataFrame()
+
+    keyword_df = pd.DataFrame(rows)
+    return keyword_df.sort_values(["documentos", "citacoes"], ascending=[False, False]).head(top_n).reset_index(drop=True)
 
 
 def fetch_bulk_page(
@@ -253,6 +416,7 @@ def papers_to_dataframe(papers: list[dict[str, Any]]) -> pd.DataFrame:
             {
                 "paper_id": paper.get("paperId"),
                 "titulo": paper.get("title"),
+                "resumo": paper.get("abstract"),
                 "primeiro_autor": authors[0].get("name") if authors else None,
                 "autores": safe_join(author.get("name") for author in authors),
                 "ids_autores": safe_join(author.get("authorId") for author in authors),
@@ -283,6 +447,12 @@ def papers_to_dataframe(papers: list[dict[str, Any]]) -> pd.DataFrame:
         df["tem_pdf_aberto"] = df["pdf_acesso_aberto"].fillna("").astype(str).str.strip().ne("")
     if "status_acesso_aberto" in df.columns:
         df["status_acesso_aberto"] = df["status_acesso_aberto"].fillna("UNKNOWN")
+    if "titulo" in df.columns or "resumo" in df.columns:
+        df["texto_analise"] = (
+            df.get("titulo", pd.Series("", index=df.index)).fillna("").astype(str).str.strip()
+            + " "
+            + df.get("resumo", pd.Series("", index=df.index)).fillna("").astype(str).str.strip()
+        ).str.strip()
 
     sort_columns = [col for col in ["citacoes", "ano"] if col in df.columns]
     if sort_columns:
@@ -317,6 +487,9 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
     venue_summary = build_entity_summary(df, "periodico_venue", "venue", top_n=50)
     field_summary = build_entity_summary(df, "areas_conhecimento", "area", top_n=50)
     edge_df, _ = build_coauthorship_network(df, max_nodes=50, max_edges=80)
+    keyword_summary, bigram_summary = build_keyword_summary(df, "texto_analise", top_n_terms=50, top_n_bigrams=40)
+    keyword_table = build_keyword_table(df, "texto_analise", top_n=50)
+    term_year_summary = build_term_year_summary(df, "texto_analise", top_n_terms=15)
 
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -326,6 +499,10 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
         venue_summary.to_excel(writer, sheet_name="venues", index=False)
         field_summary.to_excel(writer, sheet_name="areas", index=False)
         edge_df.to_excel(writer, sheet_name="coautoria", index=False)
+        keyword_summary.to_excel(writer, sheet_name="palavras", index=False)
+        bigram_summary.to_excel(writer, sheet_name="bigramas", index=False)
+        keyword_table.to_excel(writer, sheet_name="palavras_citacoes", index=False)
+        term_year_summary.to_excel(writer, sheet_name="palavras_ano", index=False)
     return buffer.getvalue()
 
 
@@ -515,9 +692,12 @@ def show_charts(df: pd.DataFrame) -> None:
     type_summary = build_entity_summary(df, "tipos_publicacao", "tipo", top_n=20)
     open_access_summary = build_open_access_summary(df)
     edge_df, node_df = build_coauthorship_network(df)
+    keyword_summary, bigram_summary = build_keyword_summary(df, "texto_analise", top_n_terms=25, top_n_bigrams=20)
+    keyword_table = build_keyword_table(df, "texto_analise", top_n=20)
+    term_year_summary = build_term_year_summary(df, "texto_analise", top_n_terms=12)
 
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-        ["Produção", "Atores", "Grafos", "Tabelas", "Termos", "Dados"]
+        ["Produção", "Atores", "Grafos", "Tabelas", "Assuntos", "Dados"]
     )
 
     with tab1:
@@ -599,25 +779,42 @@ def show_charts(df: pd.DataFrame) -> None:
                 st.dataframe(open_access_summary, use_container_width=True)
 
     with tab5:
-        terms = top_words(df["titulo"], n=25)
-        if not terms.empty:
-            st.subheader("Termos mais frequentes nos títulos")
-            st.bar_chart(terms.set_index("termo"))
+        subject_col1, subject_col2 = st.columns(2)
+        with subject_col1:
+            if not field_summary.empty:
+                st.subheader("Assuntos mais frequentes")
+                st.bar_chart(field_summary.set_index("area")[["documentos"]])
+                st.dataframe(field_summary, use_container_width=True)
 
-        st.subheader("Amostra dos dados tratados")
-        st.dataframe(
-            df[
-                [
-                    "titulo",
-                    "autores",
-                    "periodico_venue",
-                    "tipos_publicacao",
-                    "areas_conhecimento",
-                    "citacoes",
-                ]
-            ].head(15),
-            use_container_width=True,
-        )
+            if not keyword_summary.empty:
+                st.subheader("Palavras-chave mais frequentes")
+                st.bar_chart(keyword_summary.set_index("termo"))
+
+        with subject_col2:
+            if not bigram_summary.empty:
+                st.subheader("Expressões mais frequentes")
+                st.bar_chart(bigram_summary.set_index("2grama"))
+
+            if not keyword_table.empty:
+                st.subheader("Palavras-chave com mais impacto")
+                st.dataframe(keyword_table, use_container_width=True)
+
+        if not term_year_summary.empty:
+            st.subheader("Evolução das palavras-chave por ano")
+            pivot = term_year_summary.pivot(index="ano", columns="termo", values="frequencia").fillna(0).astype(int)
+            st.dataframe(pivot, use_container_width=True)
+            st.line_chart(pivot)
+
+        st.subheader("Amostra com títulos e resumos")
+        sample_columns = [
+            "titulo",
+            "resumo",
+            "autores",
+            "areas_conhecimento",
+            "citacoes",
+        ]
+        available_sample_columns = [column for column in sample_columns if column in df.columns]
+        st.dataframe(df[available_sample_columns].head(15), use_container_width=True)
 
     with tab6:
         st.subheader("Resultados completos")
