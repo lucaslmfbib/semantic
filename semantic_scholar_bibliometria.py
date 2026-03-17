@@ -8,6 +8,7 @@ import os
 import re
 from collections import Counter
 from dataclasses import dataclass
+from itertools import combinations
 from typing import Any, Iterable
 
 import pandas as pd
@@ -122,13 +123,26 @@ def safe_int(value: Any) -> int:
         return 0
 
 
+def extract_unique_parts(value: Any) -> list[str]:
+    if value is None:
+        return []
+    try:
+        if pd.isna(value):
+            return []
+    except TypeError:
+        pass
+    parts = []
+    for part in str(value).split(";"):
+        cleaned = part.strip()
+        if cleaned and cleaned not in parts:
+            parts.append(cleaned)
+    return parts
+
+
 def split_multivalue_column(series: pd.Series) -> pd.Series:
     values: list[str] = []
     for item in series.dropna().astype(str):
-        for part in item.split(";"):
-            cleaned = part.strip()
-            if cleaned:
-                values.append(cleaned)
+        values.extend(extract_unique_parts(item))
     return pd.Series(values, dtype="string")
 
 
@@ -298,10 +312,183 @@ def filter_dataframe(
 
 
 def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
+    year_summary = build_year_summary(df)
+    author_summary = build_entity_summary(df, "autores", "autor", top_n=50)
+    venue_summary = build_entity_summary(df, "periodico_venue", "venue", top_n=50)
+    field_summary = build_entity_summary(df, "areas_conhecimento", "area", top_n=50)
+    edge_df, _ = build_coauthorship_network(df, max_nodes=50, max_edges=80)
+
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="semantic_scholar", index=False)
+        df.to_excel(writer, sheet_name="documentos", index=False)
+        year_summary.to_excel(writer, sheet_name="anos", index=False)
+        author_summary.to_excel(writer, sheet_name="autores", index=False)
+        venue_summary.to_excel(writer, sheet_name="venues", index=False)
+        field_summary.to_excel(writer, sheet_name="areas", index=False)
+        edge_df.to_excel(writer, sheet_name="coautoria", index=False)
     return buffer.getvalue()
+
+
+def build_year_summary(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "ano" not in df.columns:
+        return pd.DataFrame()
+
+    summary = (
+        df.dropna(subset=["ano"])
+        .groupby("ano", as_index=False)
+        .agg(
+            documentos=("paper_id", "nunique"),
+            citacoes=("citacoes", "sum"),
+            citacoes_influentes=("citacoes_influentes", "sum"),
+            referencias=("referencias", "sum"),
+            pdf_aberto=("tem_pdf_aberto", "sum"),
+        )
+        .sort_values("ano", ascending=True)
+    )
+    if not summary.empty:
+        summary["citacoes_medias"] = (summary["citacoes"] / summary["documentos"]).round(2)
+        summary["taxa_pdf_aberto"] = ((summary["pdf_aberto"] / summary["documentos"]) * 100).round(1)
+    return summary
+
+
+def build_entity_summary(df: pd.DataFrame, column_name: str, label: str, top_n: int = 20) -> pd.DataFrame:
+    if df.empty or column_name not in df.columns:
+        return pd.DataFrame()
+
+    rows = []
+    for row in df.itertuples(index=False):
+        for entity in extract_unique_parts(getattr(row, column_name)):
+            rows.append(
+                {
+                    label: entity,
+                    "paper_id": getattr(row, "paper_id"),
+                    "citacoes": safe_int(getattr(row, "citacoes")),
+                    "citacoes_influentes": safe_int(getattr(row, "citacoes_influentes")),
+                    "tem_pdf_aberto": bool(getattr(row, "tem_pdf_aberto")),
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame()
+
+    exploded = pd.DataFrame(rows)
+    summary = (
+        exploded.groupby(label, as_index=False)
+        .agg(
+            documentos=("paper_id", "nunique"),
+            citacoes=("citacoes", "sum"),
+            citacoes_influentes=("citacoes_influentes", "sum"),
+            pdf_aberto=("tem_pdf_aberto", "sum"),
+        )
+        .sort_values(["documentos", "citacoes"], ascending=[False, False])
+        .head(top_n)
+        .reset_index(drop=True)
+    )
+    summary["citacoes_medias"] = (summary["citacoes"] / summary["documentos"]).round(2)
+    summary["taxa_pdf_aberto"] = ((summary["pdf_aberto"] / summary["documentos"]) * 100).round(1)
+    return summary
+
+
+def build_open_access_summary(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "status_acesso_aberto" not in df.columns:
+        return pd.DataFrame()
+    summary = (
+        df.groupby("status_acesso_aberto", as_index=False)
+        .agg(
+            documentos=("paper_id", "nunique"),
+            citacoes=("citacoes", "sum"),
+        )
+        .sort_values(["documentos", "citacoes"], ascending=[False, False])
+        .reset_index(drop=True)
+    )
+    return summary
+
+
+def build_coauthorship_network(
+    df: pd.DataFrame,
+    max_nodes: int = 30,
+    max_edges: int = 40,
+    max_authors_per_paper: int = 8,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if df.empty or "autores" not in df.columns:
+        return pd.DataFrame(), pd.DataFrame()
+
+    edge_weights: Counter[tuple[str, str]] = Counter()
+    node_docs: Counter[str] = Counter()
+    node_citations: Counter[str] = Counter()
+
+    for row in df.itertuples(index=False):
+        authors = extract_unique_parts(getattr(row, "autores"))[:max_authors_per_paper]
+        citations = safe_int(getattr(row, "citacoes"))
+        for author in authors:
+            node_docs[author] += 1
+            node_citations[author] += citations
+        for source, target in combinations(authors, 2):
+            edge_weights[tuple(sorted((source, target)))] += 1
+
+    node_df = pd.DataFrame(
+        [
+            {"autor": author, "documentos": docs, "citacoes": node_citations[author]}
+            for author, docs in node_docs.items()
+        ]
+    )
+    if node_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    node_df = node_df.sort_values(["documentos", "citacoes"], ascending=[False, False]).head(max_nodes)
+    allowed_authors = set(node_df["autor"])
+
+    edge_df = pd.DataFrame(
+        [
+            {"source": source, "target": target, "peso": weight}
+            for (source, target), weight in edge_weights.items()
+            if source in allowed_authors and target in allowed_authors
+        ]
+    )
+    if edge_df.empty:
+        return edge_df, node_df.reset_index(drop=True)
+
+    edge_df = edge_df.sort_values(["peso", "source", "target"], ascending=[False, True, True]).head(max_edges)
+    connected_authors = set(edge_df["source"]).union(edge_df["target"])
+    node_df = node_df[node_df["autor"].isin(connected_authors)].reset_index(drop=True)
+    return edge_df.reset_index(drop=True), node_df
+
+
+def build_coauthorship_dot(edge_df: pd.DataFrame, node_df: pd.DataFrame) -> str:
+    if edge_df.empty or node_df.empty:
+        return ""
+
+    node_docs = {row["autor"]: safe_int(row["documentos"]) for _, row in node_df.iterrows()}
+    node_citations = {row["autor"]: safe_int(row["citacoes"]) for _, row in node_df.iterrows()}
+    max_docs = max(node_docs.values()) if node_docs else 1
+    max_weight = max(edge_df["peso"]) if not edge_df.empty else 1
+
+    lines = [
+        "graph G {",
+        'graph [layout="sfdp", overlap=false, splines=true, bgcolor="transparent"];',
+        'node [shape=circle, style="filled", fillcolor="#E8F1FB", color="#1D4E89", fontname="Helvetica"];',
+        'edge [color="#8FB3D9", fontname="Helvetica"];',
+    ]
+
+    for author in sorted(node_docs):
+        docs = node_docs[author]
+        citations = node_citations.get(author, 0)
+        size = 0.8 + (docs / max_docs) * 1.6
+        fontsize = 10 + int((docs / max_docs) * 8)
+        label = f"{author}\\n{docs} docs | {citations} cit."
+        lines.append(
+            f'"{author}" [width={size:.2f}, height={size:.2f}, fontsize={fontsize}, label="{label}"];'
+        )
+
+    for _, row in edge_df.iterrows():
+        weight = safe_int(row["peso"])
+        penwidth = 1.0 + (weight / max_weight) * 4.0
+        lines.append(
+            f'"{row["source"]}" -- "{row["target"]}" [label="{weight}", penwidth={penwidth:.2f}];'
+        )
+
+    lines.append("}")
+    return "\n".join(lines)
 
 
 def show_metric_block(df: pd.DataFrame) -> None:
@@ -321,23 +508,38 @@ def show_metric_block(df: pd.DataFrame) -> None:
 
 
 def show_charts(df: pd.DataFrame) -> None:
-    tab1, tab2, tab3, tab4 = st.tabs(["Produção", "Atores", "Termos", "Dados"])
+    year_summary = build_year_summary(df)
+    author_summary = build_entity_summary(df, "autores", "autor", top_n=20)
+    venue_summary = build_entity_summary(df, "periodico_venue", "venue", top_n=20)
+    field_summary = build_entity_summary(df, "areas_conhecimento", "area", top_n=20)
+    type_summary = build_entity_summary(df, "tipos_publicacao", "tipo", top_n=20)
+    open_access_summary = build_open_access_summary(df)
+    edge_df, node_df = build_coauthorship_network(df)
+
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ["Produção", "Atores", "Grafos", "Tabelas", "Termos", "Dados"]
+    )
 
     with tab1:
-        by_year = df.dropna(subset=["ano"]).groupby("ano").size().reset_index(name="publicacoes")
-        if not by_year.empty:
+        if not year_summary.empty:
             st.subheader("Publicações por ano")
-            st.bar_chart(by_year.set_index("ano"))
+            st.bar_chart(year_summary.set_index("ano")[["documentos"]])
 
-        citations_by_year = (
-            df.dropna(subset=["ano"])
-            .groupby("ano", as_index=False)["citacoes"]
-            .sum()
-            .rename(columns={"citacoes": "citacoes_totais"})
-        )
-        if not citations_by_year.empty:
             st.subheader("Citações acumuladas por ano")
-            st.line_chart(citations_by_year.set_index("ano"))
+            st.line_chart(year_summary.set_index("ano")[["citacoes"]])
+
+            st.subheader("Taxa de documentos com PDF aberto por ano")
+            st.line_chart(year_summary.set_index("ano")[["taxa_pdf_aberto"]])
+
+        scatter_df = df.dropna(subset=["citacoes", "referencias"]).copy()
+        if not scatter_df.empty:
+            st.subheader("Relação entre referências e citações")
+            st.caption("Cada ponto representa um documento recuperado.")
+            st.scatter_chart(scatter_df, x="referencias", y="citacoes", size="quantidade_autores", color="ano")
+
+        if not open_access_summary.empty:
+            st.subheader("Status de acesso aberto")
+            st.bar_chart(open_access_summary.set_index("status_acesso_aberto")[["documentos"]])
 
         top_cited = df.nlargest(10, "citacoes")[["titulo", "primeiro_autor", "ano", "citacoes", "url"]]
         if not top_cited.empty:
@@ -345,28 +547,58 @@ def show_charts(df: pd.DataFrame) -> None:
             st.dataframe(top_cited, use_container_width=True)
 
     with tab2:
-        authors = split_multivalue_column(df["autores"]).value_counts().head(20)
-        if not authors.empty:
+        if not author_summary.empty:
             st.subheader("Top autores")
-            st.bar_chart(authors)
+            st.bar_chart(author_summary.set_index("autor")[["documentos"]])
+            st.dataframe(author_summary, use_container_width=True)
 
-        venues = df["periodico_venue"].dropna().astype(str).str.strip()
-        top_venues = venues[venues.ne("")].value_counts().head(20)
-        if not top_venues.empty:
+        if not venue_summary.empty:
             st.subheader("Top periódicos / venues")
-            st.bar_chart(top_venues)
+            st.bar_chart(venue_summary.set_index("venue")[["documentos"]])
 
-        types = split_multivalue_column(df["tipos_publicacao"]).value_counts().head(15)
-        if not types.empty:
+        if not type_summary.empty:
             st.subheader("Tipos de publicação")
-            st.bar_chart(types)
+            st.bar_chart(type_summary.set_index("tipo")[["documentos"]])
 
-        fields = split_multivalue_column(df["areas_conhecimento"]).value_counts().head(15)
-        if not fields.empty:
+        if not field_summary.empty:
             st.subheader("Áreas do conhecimento")
-            st.bar_chart(fields)
+            st.bar_chart(field_summary.set_index("area")[["documentos"]])
 
     with tab3:
+        st.subheader("Grafo de coautoria")
+        if edge_df.empty or node_df.empty:
+            st.info("Não houve coautorias suficientes nos resultados filtrados para montar o grafo.")
+        else:
+            st.caption("Nós maiores representam autores com mais documentos. As arestas indicam coautorias.")
+            dot_graph = build_coauthorship_dot(edge_df, node_df)
+            st.graphviz_chart(dot_graph, use_container_width=True)
+            st.dataframe(edge_df.rename(columns={"source": "autor_1", "target": "autor_2"}), use_container_width=True)
+
+    with tab4:
+        st.subheader("Resumo por ano")
+        if not year_summary.empty:
+            st.dataframe(year_summary, use_container_width=True)
+
+        summary_col1, summary_col2 = st.columns(2)
+        with summary_col1:
+            st.subheader("Resumo por periódico / venue")
+            if not venue_summary.empty:
+                st.dataframe(venue_summary, use_container_width=True)
+
+            st.subheader("Resumo por tipo de publicação")
+            if not type_summary.empty:
+                st.dataframe(type_summary, use_container_width=True)
+
+        with summary_col2:
+            st.subheader("Resumo por área do conhecimento")
+            if not field_summary.empty:
+                st.dataframe(field_summary, use_container_width=True)
+
+            st.subheader("Resumo por status de acesso aberto")
+            if not open_access_summary.empty:
+                st.dataframe(open_access_summary, use_container_width=True)
+
+    with tab5:
         terms = top_words(df["titulo"], n=25)
         if not terms.empty:
             st.subheader("Termos mais frequentes nos títulos")
@@ -387,7 +619,7 @@ def show_charts(df: pd.DataFrame) -> None:
             use_container_width=True,
         )
 
-    with tab4:
+    with tab6:
         st.subheader("Resultados completos")
         st.dataframe(df, use_container_width=True)
 
@@ -424,15 +656,29 @@ def main() -> None:
     except Exception:
         secrets_api_key = ""
     default_api_key = env_api_key or secrets_api_key or ""
+    has_managed_api_key = bool(default_api_key)
 
     with st.sidebar:
         st.header("Consulta")
-        api_key = st.text_input(
-            "Chave da API Semantic Scholar",
-            type="password",
-            value=default_api_key,
-            help="Opcional para testes leves, mas recomendada para uso recorrente.",
-        )
+        if has_managed_api_key:
+            st.success("A chave da API ja esta configurada no servidor. Os visitantes nao precisam informar uma chave.")
+            override_api_key = st.toggle("Usar outra chave nesta sessao", value=False)
+            if override_api_key:
+                api_key = st.text_input(
+                    "Substituir chave da API",
+                    type="password",
+                    value=default_api_key,
+                    help="Use isso apenas se quiser testar outra chave nesta sessao.",
+                )
+            else:
+                api_key = default_api_key
+        else:
+            api_key = st.text_input(
+                "Chave da API Semantic Scholar",
+                type="password",
+                value="",
+                help="Opcional para testes leves, mas recomendada para uso recorrente.",
+            )
         query = st.text_area("Consulta", value=DEFAULT_QUERY, height=110)
         year_filter = st.text_input(
             "Filtro de ano",

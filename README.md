@@ -7,8 +7,10 @@ App em Streamlit para repetir a análise bibliométrica que antes usava Scopus, 
 - busca artigos pelo endpoint `GET /graph/v1/paper/search/bulk`
 - pagina resultados usando `token`, no estilo do exemplo `search_bulk/get_dataset.py` do repositório `allenai/s2-folks`
 - calcula indicadores bibliométricos simples
-- mostra gráficos por ano, autores, venues, tipos de publicação e termos dos títulos
-- exporta os dados tratados em CSV e Excel
+- mostra gráficos por ano, autores, venues, tipos de publicação, áreas e termos dos títulos
+- inclui tabelas-resumo por ano, autores, periódicos, áreas e acesso aberto
+- inclui grafo de coautoria entre autores
+- exporta os dados tratados em CSV e Excel com múltiplas abas de resumo
 
 ## Instalação
 
@@ -31,6 +33,8 @@ Para o deploy no Streamlit Community Cloud, a mesma chave pode ser colada como s
 ```toml
 S2_API_KEY = "sua-chave-aqui"
 ```
+
+Quando a chave estiver configurada em `Secrets`, o app usa essa chave no servidor e os visitantes não precisam preencher esse campo na interface.
 
 ## Execução
 
