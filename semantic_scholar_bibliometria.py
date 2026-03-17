@@ -968,7 +968,14 @@ def main() -> None:
             help="Exemplos: 2020-2024, 2023- ou -2019.",
         )
         page_size = st.slider("Resultados por página", min_value=25, max_value=100, value=50, step=25)
-        max_results = st.slider("Máximo de resultados para análise", min_value=100, max_value=10000, value=500, step=100)
+        max_results = st.number_input(
+            "Máximo de resultados para análise",
+            min_value=100,
+            max_value=20000,
+            value=500,
+            step=100,
+            help="Use valores altos com cuidado: consultas grandes podem demorar mais e aumentar o uso da API.",
+        )
         if max_results > 2000:
             st.caption("Consultas muito grandes podem levar mais tempo e consumir mais chamadas da API.")
         run = st.button("Buscar e analisar", type="primary", use_container_width=True)
