@@ -777,7 +777,7 @@ def show_charts(df: pd.DataFrame) -> None:
     keyword_edge_df, keyword_node_df = build_keyword_network(df, "texto_analise", max_terms=20, max_edges=40)
 
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-        ["Produção", "Atores", "Grafos", "Tabelas", "Assuntos", "Dados"]
+        ["Produção", "Autores", "Grafos", "Tabelas", "Assuntos", "Dados"]
     )
 
     with tab1:
