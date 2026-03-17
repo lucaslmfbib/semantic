@@ -43,6 +43,12 @@ Quando a chave estiver configurada em `Secrets`, o app usa essa chave no servido
 streamlit run streamlit_app.py
 ```
 
+## Google Colab
+
+Notebook pronto para rodar no Colab:
+
+- [Abrir no Google Colab](https://colab.research.google.com/github/lucaslmfbib/semantic/blob/main/notebooks/semantic_scholar_bibliometria_colab.ipynb)
+
 ## Consulta de exemplo
 
 ```text
